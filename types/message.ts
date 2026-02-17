@@ -8,11 +8,18 @@ export interface Attachment {
   mimeType: string;
 }
 
+export interface PersistedToolCall {
+  tool: string;
+  args: Record<string, unknown>;
+  result?: string;
+}
+
 export interface MessageMetadata {
   model?: string;
   tokensUsed?: { input: number; output: number };
   agentId?: string;
   skillsUsed?: string[];
+  toolCalls?: PersistedToolCall[];
 }
 
 export interface Message {

@@ -45,9 +45,22 @@ export function getOrCreateWSS(): WebSocketServer {
           channelManager.send(ws, { type: "pong" });
           break;
 
-        case "subscribe":
+        case "subscribe": {
           channelManager.subscribe(ws, msg.channel);
+
+          // Auto-create terminal session when subscribing to a terminal channel
+          const terminalMatch = msg.channel.match(
+            /^terminal:([^:]+):([^:]+)$/
+          );
+          if (terminalMatch) {
+            const [, sandboxId, terminalId] = terminalMatch;
+            // Only create if not already active
+            if (!terminalSessions.has(terminalId)) {
+              await createTerminalSession(ws, terminalId, sandboxId);
+            }
+          }
           break;
+        }
 
         case "unsubscribe":
           channelManager.unsubscribe(ws, msg.channel);

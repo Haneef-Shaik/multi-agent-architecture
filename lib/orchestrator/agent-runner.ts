@@ -1,6 +1,7 @@
 import { streamText, tool, stepCountIs, type ModelMessage } from "ai";
 import { z } from "zod";
 import type { AgentConfig, AgentId } from "@/types/agent";
+import type { PersistedToolCall } from "@/types/message";
 import { bus } from "./message-bus";
 import { skillRegistry } from "@/lib/skills/registry";
 import { getProvider } from "@/lib/ai/providers";
@@ -9,6 +10,12 @@ import * as terminalTools from "@/lib/tools/terminal";
 import * as gitTools from "@/lib/tools/git";
 import * as pmTools from "@/lib/tools/package-manager";
 import * as browserTools from "@/lib/tools/browser";
+
+export interface AgentRunResult {
+  text: string;
+  usage: { input: number; output: number };
+  toolCalls: PersistedToolCall[];
+}
 
 // --- Tool Schemas ---
 
@@ -395,7 +402,7 @@ export interface AgentRunOptions {
   signal?: AbortSignal;
 }
 
-export async function runAgent(options: AgentRunOptions): Promise<string> {
+export async function runAgent(options: AgentRunOptions): Promise<AgentRunResult> {
   const {
     agentConfig,
     messages,
@@ -446,6 +453,9 @@ export async function runAgent(options: AgentRunOptions): Promise<string> {
   });
 
   let fullText = "";
+  const collectedToolCalls: PersistedToolCall[] = [];
+  // Map from toolName to index in collectedToolCalls for pairing results
+  const pendingToolCalls = new Map<string, number>();
 
   try {
     const result = streamText({
@@ -472,6 +482,11 @@ export async function runAgent(options: AgentRunOptions): Promise<string> {
                     unknown
                   >)
                 : {};
+
+            const idx = collectedToolCalls.length;
+            collectedToolCalls.push({ tool: toolName, args });
+            pendingToolCalls.set(toolName, idx);
+
             onToolCall?.(toolName, args);
             bus.emitAgentEvent({
               type: "agent:tool:call",
@@ -488,17 +503,29 @@ export async function runAgent(options: AgentRunOptions): Promise<string> {
               "toolName" in tr
                 ? ((tr as Record<string, unknown>).toolName as string)
                 : "unknown";
-            const result =
+            const trResult =
               "result" in tr
                 ? (tr as Record<string, unknown>).result
                 : undefined;
-            onToolResult?.(toolName, result, 0);
+
+            // Pair result with the pending tool call
+            const idx = pendingToolCalls.get(toolName);
+            if (idx !== undefined) {
+              const resultStr = typeof trResult === "string"
+                ? trResult
+                : JSON.stringify(trResult);
+              // Truncate long results for storage
+              collectedToolCalls[idx].result = resultStr?.slice(0, 500);
+              pendingToolCalls.delete(toolName);
+            }
+
+            onToolResult?.(toolName, trResult, 0);
             bus.emitAgentEvent({
               type: "agent:tool:result",
               agentId: agentConfig.id,
               taskId,
               timestamp: Date.now(),
-              payload: { tool: toolName, result },
+              payload: { tool: toolName, result: trResult },
             });
           }
         }
@@ -517,15 +544,22 @@ export async function runAgent(options: AgentRunOptions): Promise<string> {
       });
     }
 
+    // Extract token usage from the AI SDK result
+    const usage = await result.usage;
+    const tokenUsage = {
+      input: usage?.inputTokens ?? 0,
+      output: usage?.outputTokens ?? 0,
+    };
+
     bus.emitAgentEvent({
       type: "agent:completed",
       agentId: agentConfig.id,
       taskId,
       timestamp: Date.now(),
-      payload: { result: fullText },
+      payload: { result: fullText, usage: tokenUsage },
     });
 
-    return fullText;
+    return { text: fullText, usage: tokenUsage, toolCalls: collectedToolCalls };
   } catch (error) {
     bus.emitAgentEvent({
       type: "agent:error",

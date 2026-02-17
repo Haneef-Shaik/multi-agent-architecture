@@ -8,6 +8,7 @@
  * - AWS Bedrock (Claude, Llama, Mistral, Titan, etc. via AWS)
  * - Azure OpenAI (GPT models deployed on Azure)
  * - Azure AI Foundry (DeepSeek, Llama, Mistral, etc. via Azure AI)
+ * - Anthropic Foundry (Claude models via Microsoft Azure AI Foundry)
  *
  * Model string format: "provider/model-id"
  * Examples:
@@ -18,6 +19,7 @@
  *   "bedrock/meta.llama3-1-70b-instruct-v1:0"
  *   "azure/gpt-4o"                  (Azure OpenAI deployment name)
  *   "azure-foundry/DeepSeek-R1"     (Azure AI Foundry model name)
+ *   "anthropic-foundry/claude-sonnet-4-5" (Claude via Microsoft Foundry)
  */
 
 import { createAnthropic } from "@ai-sdk/anthropic";
@@ -74,6 +76,19 @@ function azureFoundry() {
   });
 }
 
+function anthropicFoundry() {
+  const resource = process.env.ANTHROPIC_FOUNDRY_RESOURCE;
+  const apiKey = process.env.ANTHROPIC_FOUNDRY_API_KEY;
+  return createAnthropic({
+    baseURL: `https://${resource}.services.ai.azure.com/anthropic/v1`,
+    apiKey,
+    headers: {
+      "x-api-key": apiKey ?? "",
+      "anthropic-version": "2023-06-01",
+    },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // getProvider — resolves a "provider/model" string to an AI SDK model instance
 // ---------------------------------------------------------------------------
@@ -102,6 +117,10 @@ export function getProvider(modelString: string) {
     case "azure-foundry":
       // Azure AI Foundry — modelId is the model/deployment name
       return azureFoundry()(modelId);
+
+    case "anthropic-foundry":
+      // Anthropic Claude models via Microsoft Azure AI Foundry
+      return anthropicFoundry()(modelId);
 
     default:
       // Fallback: try Anthropic with the full string
@@ -164,6 +183,13 @@ export const PROVIDERS: ProviderInfo[] = [
     description:
       "DeepSeek, Llama, Mistral, and other models via Microsoft Azure AI Foundry",
     envVars: ["AZURE_AI_FOUNDRY_ENDPOINT", "AZURE_AI_FOUNDRY_API_KEY"],
+  },
+  {
+    id: "anthropic-foundry",
+    name: "Anthropic (Microsoft Foundry)",
+    description:
+      "Claude models via Microsoft Azure AI Foundry — Opus, Sonnet, and Haiku",
+    envVars: ["ANTHROPIC_FOUNDRY_RESOURCE", "ANTHROPIC_FOUNDRY_API_KEY"],
   },
 ];
 
@@ -329,6 +355,38 @@ export const MODELS: ModelInfo[] = [
     name: "Phi-4 (Azure Foundry)",
     provider: "azure-foundry",
     capabilities: ["reasoning", "efficient"],
+  },
+
+  // --- Anthropic via Microsoft Foundry ---
+  {
+    id: "anthropic-foundry/claude-opus-4-6",
+    name: "Claude Opus 4.6 (Microsoft Foundry)",
+    provider: "anthropic-foundry",
+    capabilities: ["coding", "reasoning", "agents", "tool-use"],
+  },
+  {
+    id: "anthropic-foundry/claude-opus-4-5",
+    name: "Claude Opus 4.5 (Microsoft Foundry)",
+    provider: "anthropic-foundry",
+    capabilities: ["coding", "reasoning", "agents", "tool-use"],
+  },
+  {
+    id: "anthropic-foundry/claude-opus-4-1",
+    name: "Claude Opus 4.1 (Microsoft Foundry)",
+    provider: "anthropic-foundry",
+    capabilities: ["coding", "reasoning", "tool-use"],
+  },
+  {
+    id: "anthropic-foundry/claude-sonnet-4-5",
+    name: "Claude Sonnet 4.5 (Microsoft Foundry)",
+    provider: "anthropic-foundry",
+    capabilities: ["coding", "analysis", "agents", "tool-use"],
+  },
+  {
+    id: "anthropic-foundry/claude-haiku-4-5",
+    name: "Claude Haiku 4.5 (Microsoft Foundry)",
+    provider: "anthropic-foundry",
+    capabilities: ["fast", "coding", "tool-use"],
   },
 ];
 

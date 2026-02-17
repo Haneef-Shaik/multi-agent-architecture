@@ -41,8 +41,10 @@ export function useTerminal(options: UseTerminalOptions): UseTerminalReturn {
 
   const getWsUrl = useCallback(() => {
     if (wsUrl) return wsUrl;
+    // WS server runs on a separate port (default 3001)
+    const wsPort = process.env.NEXT_PUBLIC_WS_PORT ?? "3001";
     const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
-    return `${proto}//${window.location.host}/api/ws`;
+    return `${proto}//${window.location.hostname}:${wsPort}/api/ws`;
   }, [wsUrl]);
 
   const write = useCallback((data: string) => {

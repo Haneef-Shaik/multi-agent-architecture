@@ -1,53 +1,145 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { Send, Square, Bot, User } from "lucide-react";
+import { useState, useRef, useEffect, useCallback } from "react";
+import { Send, Square, Bot, User, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAgentStream } from "@/hooks/use-agent-stream";
 import { ModelSelector } from "./model-selector";
+import {
+  ToolCallDisplay,
+  type ToolCallInfo,
+} from "@/components/agents/tool-call-display";
 
 interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
+  toolCalls?: ToolCallInfo[];
+  tokensUsed?: { input: number; output: number };
 }
 
 interface ChatPanelProps {
   sessionId: string;
   containerId?: string;
-  initialMessages?: ChatMessage[];
   onEvent?: (event: string, data: Record<string, unknown>) => void;
 }
 
 export function ChatPanel({
   sessionId,
   containerId,
-  initialMessages = [],
   onEvent,
 }: ChatPanelProps) {
-  const [messages, setMessages] = useState<ChatMessage[]>(initialMessages);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [selectedModel, setSelectedModel] = useState(
     "anthropic/claude-sonnet-4-20250514"
   );
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
+  // Refs for accumulating streaming metadata
+  const streamToolCallsRef = useRef<ToolCallInfo[]>([]);
+  const streamTokensRef = useRef<{ input: number; output: number } | null>(
+    null
+  );
+
+  // Wrap onEvent to intercept tool call and usage events
+  const handleEvent = useCallback(
+    (event: string, data: Record<string, unknown>) => {
+      if (event === "agent.tool_call") {
+        const tc: ToolCallInfo = {
+          id: `tc-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          toolName: String(data.tool ?? ""),
+          args: (data.args as Record<string, unknown>) ?? {},
+          status: "running",
+          timestamp: Date.now(),
+        };
+        streamToolCallsRef.current = [...streamToolCallsRef.current, tc];
+
+        // Update the streaming message with current tool calls
+        setMessages((prev) => {
+          const idx = prev.findIndex((m) => m.id === "streaming");
+          if (idx >= 0) {
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              toolCalls: [...streamToolCallsRef.current],
+            };
+            return updated;
+          }
+          return prev;
+        });
+      } else if (event === "agent.tool_result") {
+        const toolName = String(data.tool ?? "");
+        // Find the last running tool call with this name
+        const calls = [...streamToolCallsRef.current];
+        for (let i = calls.length - 1; i >= 0; i--) {
+          if (calls[i].toolName === toolName && calls[i].status === "running") {
+            calls[i] = {
+              ...calls[i],
+              result: String(data.result ?? ""),
+              status: "completed",
+              duration: Date.now() - calls[i].timestamp,
+            };
+            break;
+          }
+        }
+        streamToolCallsRef.current = calls;
+
+        setMessages((prev) => {
+          const idx = prev.findIndex((m) => m.id === "streaming");
+          if (idx >= 0) {
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              toolCalls: [...streamToolCallsRef.current],
+            };
+            return updated;
+          }
+          return prev;
+        });
+      } else if (event === "supervisor.usage") {
+        const tokensUsed = data.tokensUsed as
+          | { input: number; output: number }
+          | undefined;
+        if (tokensUsed) {
+          streamTokensRef.current = tokensUsed;
+        }
+      }
+
+      // Forward to parent handler
+      onEvent?.(event, data);
+    },
+    [onEvent]
+  );
+
   const { sendMessage, cancel, isStreaming, streamedText, setStreamedText } =
     useAgentStream({
-      onEvent,
+      onEvent: handleEvent,
       onDone() {
-        // When streaming completes, finalize the assistant message
+        // Finalize the assistant message with accumulated metadata
         setMessages((prev) => {
           const last = prev[prev.length - 1];
           if (last?.role === "assistant" && last.id === "streaming") {
             return [
               ...prev.slice(0, -1),
-              { ...last, id: `msg-${Date.now()}` },
+              {
+                ...last,
+                id: `msg-${Date.now()}`,
+                toolCalls:
+                  streamToolCallsRef.current.length > 0
+                    ? [...streamToolCallsRef.current]
+                    : undefined,
+                tokensUsed: streamTokensRef.current ?? undefined,
+              },
             ];
           }
           return prev;
         });
+        // Reset refs for next message
+        streamToolCallsRef.current = [];
+        streamTokensRef.current = null;
         setStreamedText("");
       },
       onError(error) {
@@ -59,9 +151,76 @@ export function ChatPanel({
             content: `Error: ${error}`,
           },
         ]);
+        streamToolCallsRef.current = [];
+        streamTokensRef.current = null;
         setStreamedText("");
       },
     });
+
+  // Fetch message history when sessionId changes
+  useEffect(() => {
+    if (!sessionId) return;
+
+    let cancelled = false;
+    setIsLoadingHistory(true);
+    setMessages([]);
+
+    fetch(`/api/sessions/${sessionId}/messages?limit=100`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then(
+        (
+          dbMessages: Array<{
+            _id: string;
+            role: string;
+            content: string;
+            metadata?: {
+              tokensUsed?: { input: number; output: number };
+              toolCalls?: Array<{
+                tool: string;
+                args: Record<string, unknown>;
+                result?: string;
+              }>;
+            };
+          }>
+        ) => {
+          if (cancelled) return;
+          const mapped: ChatMessage[] = dbMessages
+            .filter((m) => m.role === "user" || m.role === "assistant")
+            .map((m) => {
+              const msg: ChatMessage = {
+                id: m._id ?? `msg-${Date.now()}-${Math.random()}`,
+                role: m.role as "user" | "assistant",
+                content: m.content,
+              };
+              if (m.metadata?.tokensUsed) {
+                msg.tokensUsed = m.metadata.tokensUsed;
+              }
+              if (m.metadata?.toolCalls && m.metadata.toolCalls.length > 0) {
+                msg.toolCalls = m.metadata.toolCalls.map((tc, i) => ({
+                  id: `hist-tc-${i}`,
+                  toolName: tc.tool,
+                  args: tc.args,
+                  result: tc.result,
+                  status: "completed" as const,
+                  timestamp: Date.now(),
+                }));
+              }
+              return msg;
+            });
+          setMessages(mapped);
+        }
+      )
+      .catch(() => {
+        // Silently fail — empty chat is fine
+      })
+      .finally(() => {
+        if (!cancelled) setIsLoadingHistory(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
 
   // Update streaming message in real-time
   useEffect(() => {
@@ -75,7 +234,15 @@ export function ChatPanel({
         }
         return [
           ...prev,
-          { id: "streaming", role: "assistant", content: streamedText },
+          {
+            id: "streaming",
+            role: "assistant",
+            content: streamedText,
+            toolCalls:
+              streamToolCallsRef.current.length > 0
+                ? [...streamToolCallsRef.current]
+                : undefined,
+          },
         ];
       });
     }
@@ -89,6 +256,10 @@ export function ChatPanel({
   const handleSubmit = async () => {
     const text = input.trim();
     if (!text || isStreaming) return;
+
+    // Reset streaming refs
+    streamToolCallsRef.current = [];
+    streamTokensRef.current = null;
 
     // Add user message
     const userMsg: ChatMessage = {
@@ -107,7 +278,16 @@ export function ChatPanel({
     <div className="flex flex-col h-full">
       {/* Messages */}
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
-        {messages.length === 0 && (
+        {isLoadingHistory && (
+          <div className="flex items-center justify-center py-8">
+            <Loader2 className="h-5 w-5 animate-spin text-[var(--muted-foreground)]" />
+            <span className="ml-2 text-sm text-[var(--muted-foreground)]">
+              Loading messages...
+            </span>
+          </div>
+        )}
+
+        {!isLoadingHistory && messages.length === 0 && (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <Bot className="h-10 w-10 text-[var(--muted-foreground)] mb-3" />
             <h3 className="font-semibold mb-1">Start building</h3>
@@ -135,9 +315,32 @@ export function ChatPanel({
                   : "bg-[var(--muted)]"
               }`}
             >
+              {/* Tool calls (shown before text for assistant messages) */}
+              {msg.role === "assistant" &&
+                msg.toolCalls &&
+                msg.toolCalls.length > 0 && (
+                  <div className="space-y-1.5 mb-2">
+                    {msg.toolCalls.map((tc) => (
+                      <ToolCallDisplay key={tc.id} toolCall={tc} />
+                    ))}
+                  </div>
+                )}
+
               <div className="whitespace-pre-wrap">{msg.content}</div>
               {msg.id === "streaming" && (
                 <span className="inline-block w-1.5 h-4 bg-[var(--accent)] animate-pulse ml-0.5" />
+              )}
+
+              {/* Token usage badge */}
+              {msg.role === "assistant" && msg.tokensUsed && (
+                <div className="mt-1.5 flex items-center gap-2 text-[10px] text-[var(--muted-foreground)]">
+                  <span title="Input tokens">
+                    {msg.tokensUsed.input.toLocaleString()} in
+                  </span>
+                  <span title="Output tokens">
+                    {msg.tokensUsed.output.toLocaleString()} out
+                  </span>
+                </div>
               )}
             </div>
             {msg.role === "user" && (

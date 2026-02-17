@@ -47,6 +47,7 @@ export default function WorkspacePage() {
     steps: agentSteps,
     timeline: agentTimeline,
     error: agentError,
+    sandboxId: agentSandboxId,
     handleSSEEvent,
     reset: resetAgentEvents,
   } = useAgentEvents();
@@ -101,7 +102,7 @@ export default function WorkspacePage() {
     <div className="h-screen">
       <WorkspaceLayout
         projectId={projectId}
-        sandboxId={null}
+        sandboxId={agentSandboxId}
         chatPanel={
           activeSessionId ? (
             <ChatPanel

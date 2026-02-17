@@ -2,9 +2,11 @@ import { generateObject, streamText, type ModelMessage } from "ai";
 import { z } from "zod";
 import { skillRegistry } from "@/lib/skills/registry";
 import { runAgent, AGENT_CONFIGS } from "./agent-runner";
+import type { AgentRunResult } from "./agent-runner";
 import { bus } from "./message-bus";
 import { getProvider } from "@/lib/ai/providers";
 import type { AgentId, TaskDAG, TaskNode, TaskEdge } from "@/types/agent";
+import type { PersistedToolCall } from "@/types/message";
 
 // Schema for the Supervisor's structured output
 const ExecutionPlanSchema = z.object({
@@ -39,6 +41,12 @@ const ExecutionPlanSchema = z.object({
 
 type ExecutionPlan = z.infer<typeof ExecutionPlanSchema>;
 
+export interface SupervisorResult {
+  text: string;
+  tokensUsed: { input: number; output: number };
+  toolCalls: PersistedToolCall[];
+}
+
 /**
  * The Supervisor orchestrates the entire agent execution pipeline.
  *
@@ -66,39 +74,48 @@ export class Supervisor {
       onEvent?: (event: string, data: unknown) => void;
       signal?: AbortSignal;
     }
-  ): Promise<string> {
+  ): Promise<SupervisorResult> {
     const { onText, onEvent, signal } = options;
+
+    const totalUsage = { input: 0, output: 0 };
+    const allToolCalls: PersistedToolCall[] = [];
 
     // Ensure skill registry is initialized
     await skillRegistry.initialize();
 
     // Step 1: Produce execution plan
     onEvent?.("supervisor.planning", { status: "started" });
-    const plan = await this.createPlan(messages);
+    const { plan, usage: planUsage } = await this.createPlan(messages);
+    totalUsage.input += planUsage.input;
+    totalUsage.output += planUsage.output;
+
     const dag = this.planToDAG(plan);
 
     onEvent?.("supervisor.plan", { plan: plan.plan, dag });
     bus.emit("task:created", { taskId: this.executionId, dag });
 
     // Step 2: Execute the DAG
-    const results = await this.executeDAG(dag, messages, {
-      onText,
-      onEvent,
-      signal,
-    });
+    const { textResults, usage: dagUsage, toolCalls: dagToolCalls } =
+      await this.executeDAG(dag, messages, { onText, onEvent, signal });
+    totalUsage.input += dagUsage.input;
+    totalUsage.output += dagUsage.output;
+    allToolCalls.push(...dagToolCalls);
 
     // Step 3: Synthesize final response
-    const finalResponse = await this.synthesize(messages, plan, results, {
-      onText,
-      signal,
-    });
+    const { text: finalResponse, usage: synthUsage } =
+      await this.synthesize(messages, plan, textResults, { onText, signal });
+    totalUsage.input += synthUsage.input;
+    totalUsage.output += synthUsage.output;
+
+    // Emit usage event before done
+    onEvent?.("supervisor.usage", { tokensUsed: totalUsage });
 
     bus.emit("task:completed", {
       taskId: this.executionId,
       results: finalResponse,
     });
 
-    return finalResponse;
+    return { text: finalResponse, tokensUsed: totalUsage, toolCalls: allToolCalls };
   }
 
   private get supervisorModel() {
@@ -107,7 +124,7 @@ export class Supervisor {
 
   private async createPlan(
     messages: ModelMessage[]
-  ): Promise<ExecutionPlan> {
+  ): Promise<{ plan: ExecutionPlan; usage: { input: number; output: number } }> {
     const skillDigest = skillRegistry.getMetadataDigest();
 
     const result = await generateObject({
@@ -134,7 +151,12 @@ For complex requests (e.g., "build a full-stack app with auth"), use multiple ag
       messages,
     });
 
-    return result.object;
+    const usage = {
+      input: result.usage?.inputTokens ?? 0,
+      output: result.usage?.outputTokens ?? 0,
+    };
+
+    return { plan: result.object, usage };
   }
 
   private planToDAG(plan: ExecutionPlan): TaskDAG {
@@ -167,10 +189,16 @@ For complex requests (e.g., "build a full-stack app with auth"), use multiple ag
       onEvent?: (event: string, data: unknown) => void;
       signal?: AbortSignal;
     }
-  ): Promise<Map<string, string>> {
-    const results = new Map<string, string>();
+  ): Promise<{
+    textResults: Map<string, string>;
+    usage: { input: number; output: number };
+    toolCalls: PersistedToolCall[];
+  }> {
+    const textResults = new Map<string, string>();
     const completed = new Set<string>();
     const running = new Set<string>();
+    const totalUsage = { input: 0, output: 0 };
+    const allToolCalls: PersistedToolCall[] = [];
 
     const getReadyNodes = () =>
       dag.nodes.filter((node) => {
@@ -205,7 +233,7 @@ For complex requests (e.g., "build a full-stack app with auth"), use multiple ag
           // Build context with results from dependency nodes
           const depResults = dag.edges
             .filter((e) => e.to === node.id)
-            .map((e) => results.get(e.from))
+            .map((e) => textResults.get(e.from))
             .filter(Boolean)
             .join("\n\n---\n\n");
 
@@ -227,7 +255,7 @@ For complex requests (e.g., "build a full-stack app with auth"), use multiple ag
           ];
 
           const config = AGENT_CONFIGS[node.agentId];
-          const result = await runAgent({
+          const agentResult: AgentRunResult = await runAgent({
             agentConfig: this.modelOverride
               ? { ...config, model: this.modelOverride }
               : config,
@@ -239,7 +267,11 @@ For complex requests (e.g., "build a full-stack app with auth"), use multiple ag
             signal: options.signal,
           });
 
-          results.set(node.id, result);
+          textResults.set(node.id, agentResult.text);
+          totalUsage.input += agentResult.usage.input;
+          totalUsage.output += agentResult.usage.output;
+          allToolCalls.push(...agentResult.toolCalls);
+
           node.status = "completed";
           completed.add(node.id);
 
@@ -250,7 +282,7 @@ For complex requests (e.g., "build a full-stack app with auth"), use multiple ag
         } catch (error) {
           node.status = "failed";
           completed.add(node.id); // mark as done to prevent blocking
-          results.set(
+          textResults.set(
             node.id,
             `Error: ${error instanceof Error ? error.message : String(error)}`
           );
@@ -268,7 +300,7 @@ For complex requests (e.g., "build a full-stack app with auth"), use multiple ag
       await Promise.all(promises);
     }
 
-    return results;
+    return { textResults, usage: totalUsage, toolCalls: allToolCalls };
   }
 
   private async synthesize(
@@ -276,7 +308,7 @@ For complex requests (e.g., "build a full-stack app with auth"), use multiple ag
     plan: ExecutionPlan,
     results: Map<string, string>,
     options: { onText?: (delta: string) => void; signal?: AbortSignal }
-  ): Promise<string> {
+  ): Promise<{ text: string; usage: { input: number; output: number } }> {
     const resultsText = Array.from(results.entries())
       .map(([nodeId, result]) => `### ${nodeId}\n${result}`)
       .join("\n\n");
@@ -301,6 +333,12 @@ For complex requests (e.g., "build a full-stack app with auth"), use multiple ag
       options.onText?.(chunk);
     }
 
-    return fullText;
+    const synthUsage = await stream.usage;
+    const usage = {
+      input: synthUsage?.inputTokens ?? 0,
+      output: synthUsage?.outputTokens ?? 0,
+    };
+
+    return { text: fullText, usage };
   }
 }

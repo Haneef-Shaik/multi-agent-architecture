@@ -12,6 +12,7 @@ interface AgentEventsState {
   timeline: TimelineEntry[];
   toolCalls: Map<string, ToolCallInfo>;
   error: string | null;
+  sandboxId: string | null;
 }
 
 type AgentEventsAction =
@@ -23,6 +24,7 @@ type AgentEventsAction =
   | { type: "AGENT_ERROR"; nodeId: string; agentId: string; error: string }
   | { type: "TOOL_CALL"; agentId: string; tool: string; args: Record<string, unknown> }
   | { type: "TOOL_RESULT"; agentId: string; tool: string; result: string }
+  | { type: "SANDBOX_READY"; sandboxId: string }
   | { type: "EXECUTION_DONE" }
   | { type: "EXECUTION_ERROR"; error: string };
 
@@ -34,6 +36,7 @@ function createInitialState(): AgentEventsState {
     timeline: [],
     toolCalls: new Map(),
     error: null,
+    sandboxId: null,
   };
 }
 
@@ -195,6 +198,9 @@ function reducer(
       return state;
     }
 
+    case "SANDBOX_READY":
+      return { ...state, sandboxId: action.sandboxId };
+
     case "EXECUTION_DONE":
       return { ...state, status: "completed" };
 
@@ -216,6 +222,13 @@ export function useAgentEvents() {
   const handleSSEEvent = useCallback(
     (event: string, data: Record<string, unknown>) => {
       switch (event) {
+        case "sandbox.ready":
+          dispatch({
+            type: "SANDBOX_READY",
+            sandboxId: String(data.sandboxId ?? ""),
+          });
+          break;
+
         case "supervisor.planning":
           dispatch({ type: "PLANNING_STARTED" });
           break;

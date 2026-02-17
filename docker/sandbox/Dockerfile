@@ -4,7 +4,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 # System dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl wget git jq vim htop \
+    curl wget git jq vim htop unzip \
     build-essential gcc g++ make \
     python3 python3-venv python3-pip \
     ca-certificates gnupg \
@@ -27,7 +27,19 @@ RUN npm install -g pnpm
 # Create sandbox user (non-root)
 RUN useradd -m -s /bin/bash sandbox \
     && mkdir -p /workspace \
-    && chown sandbox:sandbox /workspace
+    && chown sandbox:sandbox /workspace \
+    && mkdir -p /var/log/supervisor \
+    && chown -R sandbox:sandbox /var/log/supervisor \
+    && mkdir -p /var/run/supervisor \
+    && chown -R sandbox:sandbox /var/run/supervisor \
+    && chown -R sandbox:sandbox /etc/supervisor
+
+# Fix supervisord paths so the sandbox user can write pid/socket files
+RUN sed -i \
+    -e 's|file=/var/run/supervisor.sock|file=/var/run/supervisor/supervisor.sock|g' \
+    -e 's|pidfile=/var/run/supervisord.pid|pidfile=/var/run/supervisor/supervisord.pid|g' \
+    -e 's|serverurl=unix:///var/run/supervisor.sock|serverurl=unix:///var/run/supervisor/supervisor.sock|g' \
+    /etc/supervisor/supervisord.conf
 
 # Copy Bun to sandbox user
 RUN cp -r /root/.bun /home/sandbox/.bun \

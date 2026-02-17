@@ -37,18 +37,35 @@ export class SandboxManager {
   ): Promise<string> {
     // Check for existing active sandbox
     const existing = await findActiveSandbox(projectId);
-    if (existing) {
-      // Resume if hibernating
-      if (existing.status === "hibernating" && existing.containerId) {
-        await unpauseSandboxContainer(existing.containerId);
-        await updateSandbox(existing._id!.toString(), {
-          status: "active",
-        });
-        return existing._id!.toString();
+    if (existing && existing.containerId) {
+      // Verify the container actually exists in Docker
+      let containerAlive = false;
+      try {
+        const status = await getContainerStatus(existing.containerId);
+        containerAlive = status !== "not_found" && status !== "removing";
+      } catch {
+        containerAlive = false;
       }
-      // Already active
-      if (existing.status === "active" || existing.status === "ready") {
-        return existing._id!.toString();
+
+      if (!containerAlive) {
+        // Container was removed externally — mark as terminated and re-provision
+        await updateSandbox(existing._id!.toString(), {
+          status: "terminated",
+          terminatedAt: new Date(),
+        });
+      } else {
+        // Resume if hibernating
+        if (existing.status === "hibernating") {
+          await unpauseSandboxContainer(existing.containerId);
+          await updateSandbox(existing._id!.toString(), {
+            status: "active",
+          });
+          return existing._id!.toString();
+        }
+        // Already active
+        if (existing.status === "active" || existing.status === "ready") {
+          return existing._id!.toString();
+        }
       }
     }
 

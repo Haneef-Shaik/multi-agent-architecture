@@ -12,6 +12,7 @@ import {
   agentExecutionLimiter,
   rateLimitHeaders,
 } from "@/lib/utils/rate-limiter";
+import { sandboxManager } from "@/lib/sandbox/manager";
 
 export async function POST(request: NextRequest) {
   const session = await requireAuth();
@@ -50,6 +51,22 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Session not found" }, { status: 404 });
   }
 
+  // Resolve or provision a sandbox for this project
+  let resolvedContainerId = containerId;
+  let sandboxId: string | undefined;
+
+  if (!resolvedContainerId) {
+    try {
+      const projectId = chatSession.projectId.toString();
+      sandboxId = await sandboxManager.provision(session.userId, projectId);
+      resolvedContainerId =
+        (await sandboxManager.resolveContainerId(sandboxId)) ?? undefined;
+    } catch (error) {
+      console.error("Sandbox provisioning failed:", error);
+      // Continue without sandbox — tools will return "no sandbox" messages
+    }
+  }
+
   // Save the user message
   await createMessage({
     sessionId: new ObjectId(sessionId),
@@ -69,7 +86,7 @@ export async function POST(request: NextRequest) {
   const execution = await createExecution({
     sessionId: new ObjectId(sessionId),
     userId: new ObjectId(session.userId),
-    sandboxId: new ObjectId(), // placeholder until sandbox is provisioned
+    sandboxId: sandboxId ? new ObjectId(sandboxId) : new ObjectId(),
     status: "running",
     dag: { id: "", nodes: [], edges: [] },
     steps: [],
@@ -90,34 +107,40 @@ export async function POST(request: NextRequest) {
       };
 
       try {
-        const supervisor = new Supervisor(executionId, containerId, model);
-        let assistantResponse = "";
+        // Notify frontend about the sandbox
+        if (resolvedContainerId && sandboxId) {
+          send("sandbox.ready", { sandboxId, containerId: resolvedContainerId });
+        }
+
+        const supervisor = new Supervisor(executionId, resolvedContainerId, model);
 
         const result = await supervisor.execute(coreMessages, {
           onText(delta) {
             send("agent.text", { delta });
-            assistantResponse += delta;
           },
           onEvent(event, data) {
             send(event, data);
           },
         });
 
-        // Save assistant message
+        // Save assistant message with tool calls and token usage
         await createMessage({
           sessionId: new ObjectId(sessionId),
           role: "assistant",
-          content: result,
+          content: result.text,
           agentExecutionId: execution._id,
           metadata: {
+            tokensUsed: result.tokensUsed,
+            toolCalls: result.toolCalls,
             skillsUsed: [],
           },
         });
         await incrementSessionMessageCount(sessionId);
 
-        // Update execution status
+        // Update execution status with token usage
         await updateExecution(executionId, {
           status: "completed",
+          tokensUsed: result.tokensUsed,
           completedAt: new Date(),
         });
 

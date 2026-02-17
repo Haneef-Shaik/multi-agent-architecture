@@ -4,7 +4,7 @@ services:
     container_name: superagent-mongodb
     restart: unless-stopped
     ports:
-      - "27017:27017"
+      - "27018:27017"
     environment:
       MONGO_INITDB_ROOT_USERNAME: superagent
       MONGO_INITDB_ROOT_PASSWORD: superagent_dev
